@@ -1,10 +1,15 @@
 package net.ossrs.yasea;
 
+import android.annotation.TargetApi;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.ImageFormat;
 import android.hardware.Camera;
 import android.media.AudioManager;
 import android.media.AudioRecord;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.widget.Toast;
@@ -40,7 +45,18 @@ public class SrsPublisher implements SurfaceHolder.Callback, Camera.PreviewCallb
     private SrsMp4Muxer mMp4Muxer;
     private SrsEncoder mEncoder = new SrsEncoder();
 
+    private SrsScreenCapture mScreenCapture;
+    private boolean screenShare = false;
+
     public SrsPublisher() {
+        mEncoder.setCodecEventHandler(new SrsEncoder.CodecEventHandler() {
+            @Override
+            public void onCreateCodecSurface(int width, int height, Surface surface) {
+                if (screenShare) {
+                    mScreenCapture.startCapture(width, height, surface);
+                }
+            }
+        });
     }
 
     public void startEncode() {
@@ -70,6 +86,9 @@ public class SrsPublisher implements SurfaceHolder.Callback, Camera.PreviewCallb
         stopAudio();
         stopCamera();
         mEncoder.stop();
+        if (screenShare) {
+            mScreenCapture.stopCapture();
+        }
     }
 
     public void startPublish(String rtmpUrl) {
@@ -185,6 +204,9 @@ public class SrsPublisher implements SurfaceHolder.Callback, Camera.PreviewCallb
             return;
         }
         if (mCamId > (Camera.getNumberOfCameras() - 1) || mCamId < 0) {
+            return;
+        }
+        if (screenShare) {
             return;
         }
 
@@ -347,6 +369,35 @@ public class SrsPublisher implements SurfaceHolder.Callback, Camera.PreviewCallb
         mCameraView.getHolder().addCallback(this);
     }
 
+    public void initScreenCapture(MediaProjectionManager projectionManager, ScreenCaptureRequestParams requestParams) {
+        mScreenCapture = new SrsScreenCapture(projectionManager, requestParams, new MediaProjectionCallback());
+        mScreenCapture.setEventHandler(new SrsScreenCapture.EventHandler() {
+            @Override
+            public long onNeedTimestamp() {
+                return mEncoder.getTimestamp();
+            }
+
+            @Override
+            public void onDrawSurface() {
+                mEncoder.processOutBuffers();
+            }
+        });
+    }
+
+    public void switchToScreenShare() {
+        screenShare = true;
+        mEncoder.setUseSurface(true);
+    }
+
+    public void switchToCameraMode() {
+        screenShare = false;
+        mEncoder.setUseSurface(false);
+    }
+
+    public boolean isScreenCaptureInitialized() {
+        return mScreenCapture != null;
+    }
+
     @Override
     public void onPreviewFrame(byte[] data, Camera camera) {
         onGetYuvFrame(data);
@@ -370,5 +421,13 @@ public class SrsPublisher implements SurfaceHolder.Callback, Camera.PreviewCallb
 
     @Override
     public void surfaceDestroyed(SurfaceHolder arg0) {
+    }
+
+    @TargetApi(21)
+    private class MediaProjectionCallback extends MediaProjection.Callback {
+        @Override
+        public void onStop() {
+            mScreenCapture.stopCapture();
+        }
     }
 }

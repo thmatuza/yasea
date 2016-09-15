@@ -9,6 +9,8 @@ import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.media.MediaRecorder;
 import android.util.Log;
+import android.view.Surface;
+import android.os.Build;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -51,11 +53,13 @@ public class SrsEncoder {
     private boolean networkWeakTriggered = false;
     private boolean mCameraFaceFront = true;
     private boolean useSoftEncoder = false;
+    private boolean useSurface = false;
 
     private long mPresentTimeUs;
 
     private int mVideoColorFormat;
 
+    private CodecEventHandler mCodecHandler;
     private int videoFlvTrack;
     private int videoMp4Track;
     private int audioFlvTrack;
@@ -66,6 +70,11 @@ public class SrsEncoder {
         void onNetworkResume(String msg);
 
         void onNetworkWeak(String msg);
+    }
+
+    public interface CodecEventHandler {
+
+        void onCreateCodecSurface(int width, int height, Surface surface);
     }
 
     // Y, U (Cb) and V (Cr)
@@ -93,6 +102,10 @@ public class SrsEncoder {
 
     public void setNetworkEventHandler(EventHandler handler) {
         mHandler = handler;
+    }
+
+    public void setCodecEventHandler(CodecEventHandler handler) {
+        mCodecHandler = handler;
     }
 
     public boolean start() {
@@ -160,7 +173,11 @@ public class SrsEncoder {
         // setup the vencoder.
         // Note: landscape to portrait, 90 degree rotation, so we need to switch width and height in configuration
         MediaFormat videoFormat = MediaFormat.createVideoFormat(VCODEC, vOutWidth, vOutHeight);
-        videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, mVideoColorFormat);
+        if (useSurface) {
+            videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+        } else {
+            videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, mVideoColorFormat);
+        }
         videoFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 0);
         videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, vBitrate);
         videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, VFPS);
@@ -169,6 +186,15 @@ public class SrsEncoder {
         // add the video tracker to muxer.
         videoFlvTrack = flvMuxer.addTrack(videoFormat);
         videoMp4Track = mp4Muxer.addTrack(videoFormat);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            if (useSurface) {
+                Surface surface = vencoder.createInputSurface();
+                if (mCodecHandler != null) {
+                    mCodecHandler.onCreateCodecSurface(vOutWidth, vOutHeight, surface);
+                }
+            }
+        }
 
         // start device and encoder.
         vencoder.start();
@@ -223,6 +249,12 @@ public class SrsEncoder {
     public boolean isSoftEncoder() {
         return useSoftEncoder;
     }
+
+    public void setUseSurface(boolean enable) {
+        useSurface = enable;
+    }
+
+    public boolean isSurfaceUsed() { return useSurface; }
 
     public void setPreviewResolution(int width, int height) {
         vPrevWidth = width;
@@ -290,6 +322,10 @@ public class SrsEncoder {
         setEncoderResolution(vOutWidth, vOutHeight);
     }
 
+    public long getTimestamp() {
+        return System.nanoTime() - mPresentTimeUs * 1000;
+    }
+
     private void onProcessedYuvFrame(byte[] yuvFrame, long pts) {
         ByteBuffer[] inBuffers = vencoder.getInputBuffers();
         ByteBuffer[] outBuffers = vencoder.getOutputBuffers();
@@ -301,6 +337,12 @@ public class SrsEncoder {
             bb.put(yuvFrame, 0, yuvFrame.length);
             vencoder.queueInputBuffer(inBufferIndex, 0, yuvFrame.length, pts, 0);
         }
+
+        processOutBuffers();
+    }
+
+    public void processOutBuffers() {
+        ByteBuffer[] outBuffers = vencoder.getOutputBuffers();
 
         for (; ; ) {
             int outBufferIndex = vencoder.dequeueOutputBuffer(vebi, 0);
@@ -336,6 +378,9 @@ public class SrsEncoder {
     }
 
     public void onGetYuvFrame(byte[] data) {
+        if (useSurface) {
+            return;
+        }
         // Check video frame cache number to judge the networking situation.
         // Just cache GOP / FPS seconds data according to latency.
         AtomicInteger videoFrameCacheNumber = flvMuxer.getVideoFrameCacheNumber();

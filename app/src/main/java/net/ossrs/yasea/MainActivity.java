@@ -1,11 +1,19 @@
 package net.ossrs.yasea;
 
+import android.annotation.TargetApi;
 import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
+import android.content.ServiceConnection;
+import android.content.ComponentName;
+import android.media.projection.MediaProjectionManager;
 import android.os.Bundle;
+import android.os.Build.VERSION;
 import android.os.Environment;
+import android.os.IBinder;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -22,11 +30,16 @@ import java.util.Random;
 
 public class MainActivity extends Activity {
     private static final String TAG = "Yasea";
+    private static final int REQUEST_CODE = 1000;
+
+    CastService mService;
+    boolean mBound = false;
 
     Button btnPublish = null;
     Button btnSwitchCamera = null;
     Button btnRecord = null;
     Button btnSwitchEncoder = null;
+    Button btnScreenCapture = null;
 
     private SharedPreferences sp;
     private String rtmpUrl = "rtmp://ossrs.net/" + getRandomAlphaString(3) + '/' + getRandomAlphaDigitString(5);
@@ -34,9 +47,18 @@ public class MainActivity extends Activity {
 
     private SrsPublisher mPublisher = new SrsPublisher();
 
+    private ScreenCaptureRequestParams requestParams;
+    private MediaProjectionManager mProjectionManager;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        if (VERSION.SDK_INT >= 21) {
+            bindService(new Intent(this, CastService.class), mConnection, BIND_AUTO_CREATE);
+            mProjectionManager = (MediaProjectionManager) getSystemService
+                    (Context.MEDIA_PROJECTION_SERVICE);
+        }
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setContentView(R.layout.activity_main);
@@ -56,6 +78,7 @@ public class MainActivity extends Activity {
         btnSwitchCamera = (Button) findViewById(R.id.swCam);
         btnRecord = (Button) findViewById(R.id.record);
         btnSwitchEncoder = (Button) findViewById(R.id.swEnc);
+        btnScreenCapture = (Button) findViewById(R.id.capture);
 
         mPublisher.setSurfaceView((SurfaceView) findViewById(R.id.preview));
 
@@ -127,6 +150,23 @@ public class MainActivity extends Activity {
                 } else if (btnSwitchEncoder.getText().toString().contentEquals("hard enc")) {
                     mPublisher.swithToHardEncoder();
                     btnSwitchEncoder.setText("soft enc");
+                }
+            }
+        });
+
+        btnScreenCapture.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (VERSION.SDK_INT < 21) {
+                    Toast.makeText(getApplicationContext(), "not supported", Toast.LENGTH_SHORT).show();
+                } else {
+                    rtmpUrl = efu.getText().toString();
+                    Log.i(TAG, String.format("RTMP URL changed to %s", rtmpUrl));
+                    SharedPreferences.Editor editor = sp.edit();
+                    editor.putString("rtmpUrl", rtmpUrl);
+                    editor.apply();
+
+                    shareScreen();
                 }
             }
         });
@@ -308,8 +348,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+
         mPublisher.stopPublish();
         mPublisher.stopRecord();
+
+        if (VERSION.SDK_INT >= 21 && mService != null) {
+            unbindService(mConnection);
+        }
     }
 
     @Override
@@ -349,5 +394,51 @@ public class MainActivity extends Activity {
             sb.append(base.charAt(number));
         }
         return sb.toString();
+    }
+
+    /** Defines callbacks for service binding, passed to bindService() */
+    private ServiceConnection mConnection = new ServiceConnection() {
+
+        @Override
+        public void onServiceConnected(ComponentName className,
+                                       IBinder service) {
+            // We've bound to LocalService, cast the IBinder and get LocalService instance
+            CastService.CastBinder binder = (CastService.CastBinder) service;
+            mService = binder.getService();
+            mBound = true;
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName arg0) {
+            mService = null;
+            mBound = false;
+        }
+    };
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode != REQUEST_CODE) {
+            Log.e(TAG, "Unknown request code: " + requestCode);
+            return;
+        }
+        if (resultCode != RESULT_OK) {
+            Toast.makeText(getApplicationContext(),
+                    "Screen Cast Permission Denied", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        this.requestParams = new ScreenCaptureRequestParams(resultCode, data, 384, 640, 400, rtmpUrl);
+        Intent it = new Intent(getApplicationContext(), CastService.class);
+        it.putExtra("requestParams", this.requestParams);
+        it.setAction("net.ossrs.yasea.castservice.action.PLAY");
+        startService(it);
+        Intent home = new Intent();
+        home.setAction("android.intent.action.MAIN");
+        home.addCategory("android.intent.category.HOME");
+        startActivity(home);
+    }
+
+    @TargetApi(21)
+    private void shareScreen() {
+        startActivityForResult(mProjectionManager.createScreenCaptureIntent(), REQUEST_CODE);
     }
 }
